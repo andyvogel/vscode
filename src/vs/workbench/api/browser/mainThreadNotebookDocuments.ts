@@ -30,7 +30,7 @@ export class MainThreadNotebookDocuments implements MainThreadNotebookDocumentsS
 		@INotebookEditorModelResolverService private readonly _notebookEditorModelResolverService: INotebookEditorModelResolverService,
 		@IUriIdentityService private readonly _uriIdentityService: IUriIdentityService
 	) {
-		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebookDocuments);
+		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebookDocuments, { extractBuffers: true });
 		this._modelReferenceCollection = new BoundModelReferenceCollection(this._uriIdentityService.extUri);
 
 		notebooksAndEditors.onDidAddNotebooks(this._handleNotebooksAdded, this, this._disposables);

@@ -14,7 +14,7 @@ import { IMessagePassingProtocol } from 'vs/base/parts/ipc/common/ipc';
 import { LazyPromise } from 'vs/workbench/services/extensions/common/lazyPromise';
 import { IRPCProtocol, ProxyIdentifier, getStringIdentifierForProxy } from 'vs/workbench/services/extensions/common/proxyIdentifier';
 import { VSBuffer } from 'vs/base/common/buffer';
-import { MarshalledId } from 'vs/base/common/marshalling';
+import { MarshalledId, MarshalledObject } from 'vs/base/common/marshalling';
 
 export interface JSONStringifyReplacer {
 	(key: string, value: any): any;
@@ -187,20 +187,20 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 		return transformIncomingURIs(obj, this._uriTransformer);
 	}
 
-	public getProxy<T>(identifier: ProxyIdentifier<T>): T {
+	public getProxy<T>(identifier: ProxyIdentifier<T>, options?: { extractBuffers?: boolean }): T {
 		const { nid: rpcId, sid } = identifier;
 		if (!this._proxies[rpcId]) {
-			this._proxies[rpcId] = this._createProxy(rpcId, sid);
+			this._proxies[rpcId] = this._createProxy(rpcId, sid, options);
 		}
 		return this._proxies[rpcId];
 	}
 
-	private _createProxy<T>(rpcId: number, debugName: string): T {
+	private _createProxy<T>(rpcId: number, debugName: string, options?: { extractBuffers?: boolean }): T {
 		let handler = {
 			get: (target: any, name: PropertyKey) => {
 				if (typeof name === 'string' && !target[name] && name.charCodeAt(0) === CharCode.DollarSign) {
 					target[name] = (...myArgs: any[]) => {
-						return this._remoteCall(rpcId, name, myArgs);
+						return this._remoteCall(rpcId, name, myArgs, options);
 					};
 				}
 				if (name === _RPCProxySymbol) {
@@ -255,6 +255,12 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 				this._receiveRequest(msgLength, req, rpcId, method, args, (messageType === MessageType.RequestMixedArgsWithCancellation));
 				break;
 			}
+			case MessageType.RequestJSONWithBuffersArgs:
+			case MessageType.RequestJSONWithBuffersArgsWithCancellation: {
+				const { rpcId, method, args } = MessageIO.deserializeRequestJSONWithBuffersArgs(buff, this._uriTransformer);
+				this._receiveRequest(msgLength, req, rpcId, method, args, (messageType === MessageType.RequestJSONWithBuffersArgsWithCancellation), true);
+				break;
+			}
 			case MessageType.Acknowledged: {
 				if (this._logger) {
 					this._logger.logIncoming(msgLength, req, RequestInitiator.LocalSide, `ack`);
@@ -275,6 +281,11 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 				if (this._uriTransformer) {
 					value = transformIncomingURIs(value, this._uriTransformer);
 				}
+				this._receiveReply(msgLength, req, value);
+				break;
+			}
+			case MessageType.ReplyOKJSONWithBuffers: {
+				const value = MessageIO.deserializeReplyOKJSONWithBuffers(buff, this._uriTransformer);
 				this._receiveReply(msgLength, req, value);
 				break;
 			}
@@ -301,7 +312,7 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 		}
 	}
 
-	private _receiveRequest(msgLength: number, req: number, rpcId: number, method: string, args: any[], usesCancellationToken: boolean): void {
+	private _receiveRequest(msgLength: number, req: number, rpcId: number, method: string, args: any[], usesCancellationToken: boolean, extractBuffers?: boolean): void {
 		if (this._logger) {
 			this._logger.logIncoming(msgLength, req, RequestInitiator.OtherSide, `receiveRequest ${getStringIdentifierForProxy(rpcId)}.${method}(`, args);
 		}
@@ -331,7 +342,7 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 
 		promise.then((r) => {
 			delete this._cancelInvokedHandlers[callId];
-			const msg = MessageIO.serializeReplyOK(req, r, this._uriReplacer);
+			const msg = MessageIO.serializeReplyOK(req, r, this._uriReplacer, !!extractBuffers);
 			if (this._logger) {
 				this._logger.logOutgoing(msg.byteLength, req, RequestInitiator.OtherSide, `reply:`, r);
 			}
@@ -418,7 +429,7 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 		return method.apply(actor, args);
 	}
 
-	private _remoteCall(rpcId: number, methodName: string, args: any[]): Promise<any> {
+	private _remoteCall(rpcId: number, methodName: string, args: any[], options?: { extractBuffers?: boolean }): Promise<any> {
 		if (this._isDisposed) {
 			return Promise.reject<any>(errors.canceled());
 		}
@@ -432,7 +443,7 @@ export class RPCProtocol extends Disposable implements IRPCProtocol {
 			return Promise.reject<any>(errors.canceled());
 		}
 
-		const serializedRequestArguments = MessageIO.serializeRequestArguments(args, this._uriReplacer);
+		const serializedRequestArguments = MessageIO.serializeRequestArguments(methodName, args, this._uriReplacer, options);
 
 		const req = ++this._lastMessageId;
 		const callId = String(req);
@@ -622,7 +633,57 @@ class MessageBuffer {
 	}
 }
 
-type SerializedRequestArguments = { type: 'mixed'; args: VSBuffer[]; argsType: ArgType[]; } | { type: 'simple'; args: string; };
+const enum SerializedRequestArgumentType {
+	Simple,
+	Mixed,
+	WithBuffers
+}
+
+type SerializedRequestArguments =
+	| { readonly type: SerializedRequestArgumentType.Simple; args: string; }
+	| { readonly type: SerializedRequestArgumentType.Mixed; args: VSBuffer[]; argsType: ArgType[]; }
+	| { readonly type: SerializedRequestArgumentType.WithBuffers; args: string; readonly buffers: readonly VSBuffer[]; };
+
+const refSymbolName = '$$ref$$';
+const undefinedRef = { [refSymbolName]: -1 } as const;
+
+export function stringifyJsonWithBufferRefs(obj: any, replacer: JSONStringifyReplacer | null, useSafeStringify = false): { value: string, referencedBuffers: VSBuffer[] } {
+	const foundBuffers: VSBuffer[] = [];
+	const serialized = (useSafeStringify ? safeStringify : JSON.stringify)(obj, (key, value) => {
+		if (typeof value === 'undefined') {
+			return undefinedRef; // JSON.stringify normally converts 'undefined' to 'null'
+		} else if (typeof value === 'object') {
+			if (value instanceof VSBuffer) {
+				const bufferIndex = foundBuffers.push(value) - 1;
+				return { [refSymbolName]: bufferIndex };
+			}
+			if (replacer) {
+				return replacer(key, value);
+			}
+		}
+		return value;
+	});
+	return {
+		value: serialized,
+		referencedBuffers: foundBuffers
+	};
+}
+
+export function parseJsonAndRestoreBufferRefs(jsonString: string, buffers: VSBuffer[], uriTransformer: IURITransformer | null): any {
+	return JSON.parse(jsonString, (_key, value) => {
+		if (value) {
+			const ref = value[refSymbolName];
+			if (typeof ref === 'number') {
+				return buffers[ref];
+			}
+
+			if (uriTransformer && (<MarshalledObject>value).$mid === MarshalledId.Uri) {
+				return uriTransformer.transformIncoming(value);
+			}
+		}
+		return value;
+	});
+}
 
 class MessageIO {
 
@@ -638,7 +699,16 @@ class MessageIO {
 		return false;
 	}
 
-	public static serializeRequestArguments(args: any[], replacer: JSONStringifyReplacer | null): SerializedRequestArguments {
+	public static serializeRequestArguments(n: string, args: any[], replacer: JSONStringifyReplacer | null, options?: { extractBuffers?: boolean }): SerializedRequestArguments {
+		if (options?.extractBuffers) {
+			const { value, referencedBuffers } = stringifyJsonWithBufferRefs(args, replacer);
+			return {
+				type: SerializedRequestArgumentType.WithBuffers,
+				args: value,
+				buffers: referencedBuffers
+			};
+		}
+
 		if (this._arrayContainsBufferOrUndefined(args)) {
 			let massagedArgs: VSBuffer[] = [];
 			let massagedArgsType: ArgType[] = [];
@@ -656,22 +726,26 @@ class MessageIO {
 				}
 			}
 			return {
-				type: 'mixed',
+				type: SerializedRequestArgumentType.Mixed,
 				args: massagedArgs,
 				argsType: massagedArgsType
 			};
 		}
 		return {
-			type: 'simple',
+			type: SerializedRequestArgumentType.Simple,
 			args: stringify(args, replacer)
 		};
 	}
 
 	public static serializeRequest(req: number, rpcId: number, method: string, serializedArgs: SerializedRequestArguments, usesCancellationToken: boolean): VSBuffer {
-		if (serializedArgs.type === 'mixed') {
-			return this._requestMixedArgs(req, rpcId, method, serializedArgs.args, serializedArgs.argsType, usesCancellationToken);
+		switch (serializedArgs.type) {
+			case SerializedRequestArgumentType.Simple:
+				return this._requestJSONArgs(req, rpcId, method, serializedArgs.args, usesCancellationToken);
+			case SerializedRequestArgumentType.Mixed:
+				return this._requestMixedArgs(req, rpcId, method, serializedArgs.args, serializedArgs.argsType, usesCancellationToken);
+			case SerializedRequestArgumentType.WithBuffers:
+				return this._requestJSONWithBuffersArgs(req, rpcId, method, serializedArgs.args, serializedArgs.buffers, usesCancellationToken);
 		}
-		return this._requestJSONArgs(req, rpcId, method, serializedArgs.args, usesCancellationToken);
 	}
 
 	private static _requestJSONArgs(req: number, rpcId: number, method: string, args: string, usesCancellationToken: boolean): VSBuffer {
@@ -690,6 +764,31 @@ class MessageIO {
 		return result.buffer;
 	}
 
+	private static _requestJSONWithBuffersArgs(req: number, rpcId: number, method: string, args: string, buffers: readonly VSBuffer[], usesCancellationToken: boolean): VSBuffer {
+		const methodBuff = VSBuffer.fromString(method);
+		const argsBuff = VSBuffer.fromString(args);
+
+		let len = 0;
+		len += MessageBuffer.sizeUInt8();
+		len += MessageBuffer.sizeShortString(methodBuff);
+		len += MessageBuffer.sizeLongString(argsBuff);
+		len += MessageBuffer.sizeUInt8(); // buffer count
+		for (const buffer of buffers) {
+			len += MessageBuffer.sizeVSBuffer(buffer);
+		}
+
+		const result = MessageBuffer.alloc(usesCancellationToken ? MessageType.RequestJSONWithBuffersArgsWithCancellation : MessageType.RequestJSONWithBuffersArgs, req, len);
+		result.writeUInt8(rpcId);
+		result.writeShortString(methodBuff);
+		result.writeLongString(argsBuff);
+		result.writeUInt8(buffers.length);
+		for (const buffer of buffers) {
+			result.writeBuffer(buffer);
+		}
+
+		return result.buffer;
+	}
+
 	public static deserializeRequestJSONArgs(buff: MessageBuffer): { rpcId: number; method: string; args: any[]; } {
 		const rpcId = buff.readUInt8();
 		const method = buff.readShortString();
@@ -698,6 +797,25 @@ class MessageIO {
 			rpcId: rpcId,
 			method: method,
 			args: JSON.parse(args)
+		};
+	}
+
+	public static deserializeRequestJSONWithBuffersArgs(buff: MessageBuffer, uriTransformer: IURITransformer | null): { rpcId: number; method: string; args: any[]; } {
+		const rpcId = buff.readUInt8();
+		const method = buff.readShortString();
+		const rawargs = buff.readLongString();
+		const bufferCount = buff.readUInt8();
+
+		const buffers: VSBuffer[] = [];
+		for (let i = 0; i < bufferCount; ++i) {
+			buffers.push(buff.readVSBuffer());
+		}
+
+		const args = parseJsonAndRestoreBufferRefs(rawargs, buffers, uriTransformer);
+		return {
+			rpcId: rpcId,
+			method: method,
+			args: args
 		};
 	}
 
@@ -744,14 +862,19 @@ class MessageIO {
 		return MessageBuffer.alloc(MessageType.Cancel, req, 0).buffer;
 	}
 
-	public static serializeReplyOK(req: number, res: any, replacer: JSONStringifyReplacer | null): VSBuffer {
+	public static serializeReplyOK(req: number, res: any, replacer: JSONStringifyReplacer | null, extractBuffer: boolean): VSBuffer {
 		if (typeof res === 'undefined') {
 			return this._serializeReplyOKEmpty(req);
 		}
 		if (res instanceof VSBuffer) {
 			return this._serializeReplyOKVSBuffer(req, res);
 		}
-		return this._serializeReplyOKJSON(req, safeStringify(res, replacer));
+		if (extractBuffer) {
+			const { value, referencedBuffers } = stringifyJsonWithBufferRefs(res, replacer, true);
+			return this._serializeReplyOKJSONWithBuffers(req, value, referencedBuffers);
+		} else {
+			return this._serializeReplyOKJSON(req, safeStringify(res, replacer));
+		}
 	}
 
 	private static _serializeReplyOKEmpty(req: number): VSBuffer {
@@ -782,9 +905,41 @@ class MessageIO {
 		return result.buffer;
 	}
 
+	private static _serializeReplyOKJSONWithBuffers(req: number, res: string, buffers: VSBuffer[]): VSBuffer {
+		const resBuff = VSBuffer.fromString(res);
+
+		let len = 0;
+		len += MessageBuffer.sizeUInt8(); // buffer count
+		len += MessageBuffer.sizeLongString(resBuff);
+		for (const buffer of buffers) {
+			len += MessageBuffer.sizeVSBuffer(buffer);
+		}
+
+		let result = MessageBuffer.alloc(MessageType.ReplyOKJSONWithBuffers, req, len);
+		result.writeUInt8(buffers.length);
+		result.writeLongString(resBuff);
+		for (const buffer of buffers) {
+			result.writeBuffer(buffer);
+		}
+
+		return result.buffer;
+	}
+
 	public static deserializeReplyOKJSON(buff: MessageBuffer): any {
 		const res = buff.readLongString();
 		return JSON.parse(res);
+	}
+
+	public static deserializeReplyOKJSONWithBuffers(buff: MessageBuffer, uriTransformer: IURITransformer | null): any {
+		const bufferCount = buff.readUInt8();
+		const res = buff.readLongString();
+
+		const buffers: VSBuffer[] = [];
+		for (let i = 0; i < bufferCount; ++i) {
+			buffers.push(buff.readVSBuffer());
+		}
+
+		return parseJsonAndRestoreBufferRefs(res, buffers, uriTransformer);
 	}
 
 	public static serializeReplyErr(req: number, err: any): VSBuffer {
@@ -820,13 +975,16 @@ const enum MessageType {
 	RequestJSONArgsWithCancellation = 2,
 	RequestMixedArgs = 3,
 	RequestMixedArgsWithCancellation = 4,
-	Acknowledged = 5,
-	Cancel = 6,
-	ReplyOKEmpty = 7,
-	ReplyOKVSBuffer = 8,
-	ReplyOKJSON = 9,
-	ReplyErrError = 10,
-	ReplyErrEmpty = 11,
+	RequestJSONWithBuffersArgs = 5,
+	RequestJSONWithBuffersArgsWithCancellation = 6,
+	Acknowledged = 7,
+	Cancel = 8,
+	ReplyOKEmpty = 9,
+	ReplyOKVSBuffer = 10,
+	ReplyOKJSON = 11,
+	ReplyOKJSONWithBuffers = 12,
+	ReplyErrError = 13,
+	ReplyErrEmpty = 14,
 }
 
 const enum ArgType {

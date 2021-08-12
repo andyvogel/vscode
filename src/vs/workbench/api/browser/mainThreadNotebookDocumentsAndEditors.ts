@@ -100,7 +100,7 @@ export class MainThreadNotebooksAndEditors {
 		@IEditorService private readonly _editorService: IEditorService,
 		@IEditorGroupsService private readonly _editorGroupService: IEditorGroupsService,
 	) {
-		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebook);
+		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebook, { extractBuffers: true });
 
 		this._mainThreadNotebooks = instantiationService.createInstance(MainThreadNotebookDocuments, extHostContext, this);
 		this._mainThreadEditors = instantiationService.createInstance(MainThreadNotebookEditors, extHostContext, this);

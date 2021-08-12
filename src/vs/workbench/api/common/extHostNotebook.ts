@@ -84,8 +84,8 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		private _textDocuments: ExtHostDocuments,
 		private readonly _extensionStoragePaths: IExtensionStoragePaths,
 	) {
-		this._notebookProxy = mainContext.getProxy(MainContext.MainThreadNotebook);
-		this._notebookDocumentsProxy = mainContext.getProxy(MainContext.MainThreadNotebookDocuments);
+		this._notebookProxy = mainContext.getProxy(MainContext.MainThreadNotebook, { extractBuffers: true });
+		this._notebookDocumentsProxy = mainContext.getProxy(MainContext.MainThreadNotebookDocuments, { extractBuffers: true });
 		this._notebookEditorsProxy = mainContext.getProxy(MainContext.MainThreadNotebookEditors);
 		this._commandsConverter = commands.converter;
 

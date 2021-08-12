@@ -45,7 +45,7 @@ export class ExtHostNotebookKernels implements ExtHostNotebookKernelsShape {
 		private readonly _extHostNotebook: ExtHostNotebookController,
 		@ILogService private readonly _logService: ILogService,
 	) {
-		this._proxy = mainContext.getProxy(MainContext.MainThreadNotebookKernels);
+		this._proxy = mainContext.getProxy(MainContext.MainThreadNotebookKernels, { extractBuffers: true });
 	}
 
 	createNotebookController(extension: IExtensionDescription, id: string, viewType: string, label: string, handler?: (cells: vscode.NotebookCell[], notebook: vscode.NotebookDocument, controller: vscode.NotebookController) => void | Thenable<void>, preloads?: vscode.NotebookRendererScript[]): vscode.NotebookController {

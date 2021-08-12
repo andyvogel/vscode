@@ -7,7 +7,7 @@ export interface IRPCProtocol {
 	/**
 	 * Returns a proxy to an object addressable/named in the extension host process or in the renderer process.
 	 */
-	getProxy<T>(identifier: ProxyIdentifier<T>): T;
+	getProxy<T>(identifier: ProxyIdentifier<T>, options?: { extractBuffers?: boolean }): T;
 
 	/**
 	 * Register manually created instance.

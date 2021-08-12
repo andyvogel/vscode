@@ -9,6 +9,7 @@ import { IExtHostContext } from 'vs/workbench/api/common/extHost.protocol';
 import { isThenable } from 'vs/base/common/async';
 import { IExtHostRpcService } from 'vs/workbench/api/common/extHostRpcService';
 import { ExtensionHostKind } from 'vs/workbench/services/extensions/common/extensions';
+import { parseJsonAndRestoreBufferRefs, stringifyJsonWithBufferRefs } from 'vs/workbench/services/extensions/common/rpcProtocol';
 
 export function SingleProxyRPCProtocol(thing: any): IExtHostContext & IExtHostRpcService {
 	return {
@@ -78,19 +79,19 @@ export class TestRPCProtocol implements IExtHostContext, IExtHostRpcService {
 		});
 	}
 
-	public getProxy<T>(identifier: ProxyIdentifier<T>): T {
+	public getProxy<T>(identifier: ProxyIdentifier<T>, options?: { extractBuffers: true }): T {
 		if (!this._proxies[identifier.sid]) {
-			this._proxies[identifier.sid] = this._createProxy(identifier.sid);
+			this._proxies[identifier.sid] = this._createProxy(identifier.sid, options);
 		}
 		return this._proxies[identifier.sid];
 	}
 
-	private _createProxy<T>(proxyId: string): T {
+	private _createProxy<T>(proxyId: string, options?: { extractBuffers: true }): T {
 		let handler = {
 			get: (target: any, name: PropertyKey) => {
 				if (typeof name === 'string' && !target[name] && name.charCodeAt(0) === CharCode.DollarSign) {
 					target[name] = (...myArgs: any[]) => {
-						return this._remoteCall(proxyId, name, myArgs);
+						return this._remoteCall(proxyId, name, myArgs, options);
 					};
 				}
 
@@ -105,7 +106,7 @@ export class TestRPCProtocol implements IExtHostContext, IExtHostRpcService {
 		return value;
 	}
 
-	protected _remoteCall(proxyId: string, path: string, args: any[]): Promise<any> {
+	protected _remoteCall(proxyId: string, path: string, args: any[], options?: { extractBuffers: true }): Promise<any> {
 		this._callCount++;
 
 		return new Promise<any>((c) => {
@@ -113,7 +114,7 @@ export class TestRPCProtocol implements IExtHostContext, IExtHostRpcService {
 		}).then(() => {
 			const instance = this._locals[proxyId];
 			// pretend the args went over the wire... (invoke .toJSON on objects...)
-			const wireArgs = simulateWireTransfer(args);
+			const wireArgs = simulateWireTransfer(args, options);
 			let p: Promise<any>;
 			try {
 				let result = (<Function>instance[path]).apply(instance, wireArgs);
@@ -139,9 +140,15 @@ export class TestRPCProtocol implements IExtHostContext, IExtHostRpcService {
 	}
 }
 
-function simulateWireTransfer<T>(obj: T): T {
+function simulateWireTransfer<T>(obj: T, options?: { extractBuffers: true }): T {
 	if (!obj) {
 		return obj;
 	}
-	return JSON.parse(JSON.stringify(obj));
+
+	if (options?.extractBuffers) {
+		const { value, referencedBuffers } = stringifyJsonWithBufferRefs(obj, null);
+		return parseJsonAndRestoreBufferRefs(value, referencedBuffers, null);
+	} else {
+		return JSON.parse(JSON.stringify(obj));
+	}
 }

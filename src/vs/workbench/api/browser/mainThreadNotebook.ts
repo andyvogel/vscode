@@ -30,7 +30,7 @@ export class MainThreadNotebooks implements MainThreadNotebookShape {
 		@INotebookService private readonly _notebookService: INotebookService,
 		@INotebookCellStatusBarService private readonly _cellStatusBarService: INotebookCellStatusBarService,
 	) {
-		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebook);
+		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebook, { extractBuffers: true });
 	}
 
 	dispose(): void {

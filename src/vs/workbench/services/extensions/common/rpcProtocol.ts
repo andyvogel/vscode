@@ -636,13 +636,13 @@ class MessageBuffer {
 const enum SerializedRequestArgumentType {
 	Simple,
 	Mixed,
-	WithBuffers
+	WithBufferRefs
 }
 
 type SerializedRequestArguments =
 	| { readonly type: SerializedRequestArgumentType.Simple; args: string; }
 	| { readonly type: SerializedRequestArgumentType.Mixed; args: VSBuffer[]; argsType: ArgType[]; }
-	| { readonly type: SerializedRequestArgumentType.WithBuffers; args: string; readonly buffers: readonly VSBuffer[]; };
+	| { readonly type: SerializedRequestArgumentType.WithBufferRefs; args: string; readonly buffers: readonly VSBuffer[]; };
 
 const refSymbolName = '$$ref$$';
 const undefinedRef = { [refSymbolName]: -1 } as const;
@@ -703,7 +703,7 @@ class MessageIO {
 		if (options?.extractBuffers) {
 			const { value, referencedBuffers } = stringifyJsonWithBufferRefs(args, replacer);
 			return {
-				type: SerializedRequestArgumentType.WithBuffers,
+				type: SerializedRequestArgumentType.WithBufferRefs,
 				args: value,
 				buffers: referencedBuffers
 			};
@@ -743,7 +743,7 @@ class MessageIO {
 				return this._requestJSONArgs(req, rpcId, method, serializedArgs.args, usesCancellationToken);
 			case SerializedRequestArgumentType.Mixed:
 				return this._requestMixedArgs(req, rpcId, method, serializedArgs.args, serializedArgs.argsType, usesCancellationToken);
-			case SerializedRequestArgumentType.WithBuffers:
+			case SerializedRequestArgumentType.WithBufferRefs:
 				return this._requestJSONWithBuffersArgs(req, rpcId, method, serializedArgs.args, serializedArgs.buffers, usesCancellationToken);
 		}
 	}
